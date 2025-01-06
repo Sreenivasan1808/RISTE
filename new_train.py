@@ -1,19 +1,18 @@
-from models.I2C import ImageToCharacter
-from models.resnet import ResNetBackbone
+from models.I2C2W import I2C2W
 from data.dataloader import SCUTLoader
 import torchvision.transforms as transforms
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, random_split
-import torch.optim as optim 
-import torch
+from torch.utils.data import DataLoader, random_split
+import torch.optim as optim
 from utils import encode_labels_with_positions
 from test import test_model
+import torch
 
 # Image transformations (Resize, Normalize, etc.)
 transform = transforms.Compose([
     transforms.Resize((128, 128)),  # Resize images to 128x128
     transforms.ToTensor(),  # Convert image to PyTorch tensor
-    # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalize based on ImageNet stats
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalize based on ImageNet stats
 ])
 
 # Define loss functions
@@ -32,34 +31,31 @@ if __name__ == '__main__':
     # Your dataset, dataloader, model, optimizer, etc. initialization code here
     dataset = SCUTLoader(image_dir=DATA_IMG_PATH, label_dir=DATA_LABELS_PATH, transform=transform)
 
-    # print("Dataset size: ", len(dataset))
-    
     train_size = int(0.8 * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
-    
+
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=0)
     test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=0)
 
-    model = ImageToCharacter(d_model=256, num_heads=8, num_encoder_layers=3, num_decoder_layers=1, d_ff=2048, height=128, width=128, max_length=max_length, dropout=0.1)
+    model = I2C2W(d_model=256, num_heads=8, num_encoder_layers=3, num_decoder_layers=1, d_ff=2048, height=128, width=128, max_length=max_length, dropout=0.1)
 
     # Optimizer (AdamW with different learning rates for backbone and transformer)
     params = [
-        {"params": model.cnn_backbone.parameters(), "lr": 1e-5},  # ResNet backbone
-        {"params": model.encoder_layers.parameters(), "lr": 1e-4},  # Transformer encoder
-        {"params": model.decoder_layers.parameters(), "lr": 1e-4},  # Transformer decoder
+        {"params": model.i2c.cnn_backbone.parameters(), "lr": 1e-5},  # ResNet backbone
+        {"params": model.i2c.encoder_layers.parameters(), "lr": 1e-4},  # Transformer encoder
+        {"params": model.i2c.decoder_layers.parameters(), "lr": 1e-4},  # Transformer decoder
+        {"params": model.c2w.decoder_layers.parameters(), "lr": 1e-4},  # C2W decoder
     ]
 
     # Move model to device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(device)
     model.to(device)
 
     optimizer = optim.AdamW(params, weight_decay=0.01)
-    Define loss functions and start the training loop
-    Training Loop
+    # Training Loop
     num_epochs = 10
-    
+
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
@@ -77,20 +73,10 @@ if __name__ == '__main__':
 
             # Forward pass
             optimizer.zero_grad()
-            char_logits, pos_logits = model(images)
+            char_logits, pos_logits, word_logits = model(images)
 
-            # Compute character classification loss
-            char_class_loss = char_class_loss_fn(
-                char_logits.view(-1, 102), encoded_labels['char_classes'].view(-1)
-            )
-
-            # Compute position loss
-            char_position_loss = pos_loss_fn(
-                pos_logits.view(-1, 200), encoded_labels['char_positions'].view(-1)
-            )
-
-            # Combine losses
-            total_loss = char_class_loss + char_position_loss
+            # Compute total loss
+            total_loss = model.compute_loss(char_logits, pos_logits, word_logits, encoded_labels, encoded_labels['char_positions'])
 
             # Backpropagation and optimization
             total_loss.backward()
@@ -121,6 +107,5 @@ if __name__ == '__main__':
 
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss}, Character Accuracy: {char_accuracy * 100:.2f}%, Position Accuracy: {pos_accuracy * 100:.2f}%")
 
-    torch.save(model, "./results/i2c_saved.pt")
+    torch.save(model, "./results/i2c2w_saved.pt")
     test_model(test_dataloader=test_loader)
-    
